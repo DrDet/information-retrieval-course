@@ -8,8 +8,18 @@ import sys
 
 class Index:
     def __init__(self, index_file):
-        # TODO: build index
-        pass
+        self.inverted_index = {}
+        f = open(index_file, "r")
+        for line in f:
+            doc_id, title, body = line.split("\t")
+            self._add_to_index(doc_id, title.split())
+            self._add_to_index(doc_id, body.split())
+        f.close()
+
+    def _add_to_index(self, doc_id, words):
+        for w in words:
+            postings = self.inverted_index.setdefault(w, set())
+            postings.add(doc_id)
 
 
 class QueryTree:
