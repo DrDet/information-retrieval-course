@@ -88,24 +88,28 @@ class QueryParser:
     """
 
     def parse_sum(self) -> ExprTree:
+        flat = True
         res = ExprTree(TreeType.SUM)
         res.children.append(self.parse_mul())
         while True:
             if self.cur_token == "|":
+                flat = False
                 self._next_cur()
                 res.children.append(self.parse_mul())
             else:
-                return res
+                return res if not flat else res.children[0]
 
     def parse_mul(self) -> ExprTree:
+        flat = True
         res = ExprTree(TreeType.MUL)
         res.children.append(self.parse_term())
         while True:
             if self.cur_token == "&":
+                flat = False
                 self._next_cur()
                 res.children.append(self.parse_term())
             else:
-                return res
+                return res if not flat else res.children[0]
 
     def parse_term(self) -> ExprTree:
         res = None
