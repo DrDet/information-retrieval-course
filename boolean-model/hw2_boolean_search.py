@@ -4,6 +4,7 @@
 import argparse
 import codecs
 import sys
+from typing import Set, Dict
 from enum import Enum
 
 
@@ -13,9 +14,13 @@ class Index:
         f = open(index_file, "r")
         for line in f:
             doc_id, title, body = line.split("\t")
+            doc_id = int(doc_id)
             self._add_to_index(doc_id, title.split())
             self._add_to_index(doc_id, body.split())
         f.close()
+
+    def get_docs(self, word: str) -> Set[int]:
+        return self.inverted_index[word] if word in self.inverted_index else set()
 
     def _add_to_index(self, doc_id, words):
         for w in words:
@@ -126,23 +131,46 @@ class QueryParser:
 
 
 class QueryHandler:
-    def __init__(self, qid: int, query_tree: ExprTree):
+    def __init__(self, index: Index, qid: int, query_tree: ExprTree):
+        self.index = index
         self.qid = qid
         self.query_tree = query_tree
 
-    def search(self, index):
-        # TODO: lookup query terms in the index and implement boolean search logic
-        pass
+    def search(self) -> Set[int]:
+        return self._search_impl(self.query_tree)
+
+    def _search_impl(self, root: ExprTree) -> Set[int]:
+        if root.tree_type == TreeType.SUM:
+            return set().union(*map(self._search_impl, root.children))
+        if root.tree_type == TreeType.MUL:
+            return self._search_impl(root.children[0]).intersection(*map(self._search_impl, root.children[1:]))
+        if root.tree_type == TreeType.TERM:
+            return self.index.get_docs(root.val)
+        if root.tree_type == TreeType.EMPTY:
+            return set().union(*self.index.inverted_index.values())
 
 
 class SearchResults:
-    def add(self, found):
-        # TODO: add next query's results
-        pass
+    def __init__(self):
+        self.relevant = {}
+
+    def add(self, qid: int, relevant_docs: Set[int]):
+        self.relevant[qid] = relevant_docs
 
     def print_submission(self, objects_file, submission_file):
-        # TODO: generate submission file
-        pass
+        objs = open(objects_file, "r")
+        out = open(submission_file, "w")
+        out.write("ObjectId,Relevance\n")
+        first = True
+        for line in objs:
+            if first:
+                first = False
+                continue
+            obj_id, q_id, doc_id = map(int, line.split(","))
+            relevance = doc_id in self.relevant[q_id]
+            out.write("%d,%d\n" % (obj_id, relevance))
+        objs.close()
+        out.close()
 
 
 def main():
@@ -166,9 +194,9 @@ def main():
             query = fields[1]
 
             # Parse query.
-            query_handler = QueryHandler(qid, QueryParser(query).parse())
+            query_handler = QueryHandler(index, qid, QueryParser(query).parse())
             # Search and save results.
-            search_results.add(query_handler.search(index))
+            search_results.add(qid, query_handler.search())
 
     # Generate submission file.
     search_results.print_submission(args.objects_file, args.submission_file)
