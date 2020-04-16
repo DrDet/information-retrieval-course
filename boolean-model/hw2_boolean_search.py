@@ -3,29 +3,31 @@
 
 import argparse
 import codecs
-import sys
-from typing import Set, Dict
+from typing import Set
 from enum import Enum
+from array import array
+from zlib import crc32
 
 
 class Index:
-    def __init__(self, index_file):
-        self.inverted_index = {}
+    SIZE = 100007
+
+    def __init__(self, index_file: str):
+        self.inverted_index = [array("H", []) for _ in range(Index.SIZE)]
         f = open(index_file, "r")
         for line in f:
             doc_id, title, body = line.split("\t")
             doc_id = int(doc_id)
-            self._add_to_index(doc_id, title.split())
-            self._add_to_index(doc_id, body.split())
+            for w in set(title.split() + body.split()):
+                self.inverted_index[self.hash(w) % Index.SIZE].append(doc_id)
         f.close()
 
     def get_docs(self, word: str) -> Set[int]:
-        return self.inverted_index[word] if word in self.inverted_index else set()
+        return set(self.inverted_index[self.hash(word) % Index.SIZE])
 
-    def _add_to_index(self, doc_id, words):
-        for w in words:
-            postings = self.inverted_index.setdefault(w, set())
-            postings.add(doc_id)
+    @staticmethod
+    def hash(word: str) -> int:
+        return crc32(bytes(word, encoding="utf-8"))
 
 
 # S -> S | M
@@ -147,7 +149,7 @@ class QueryHandler:
         if root.tree_type == TreeType.TERM:
             return self.index.get_docs(root.val)
         if root.tree_type == TreeType.EMPTY:
-            return set().union(*self.index.inverted_index.values())
+            return set().union(*map(set, self.index.inverted_index))
 
 
 class SearchResults:
