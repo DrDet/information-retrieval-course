@@ -68,6 +68,24 @@ class ErrorModel:
         cnt2 += 1
 
 
+class Trie:
+    END_MARKER = "$"
+
+    def __init__(self, is_terminal=False, word="", freq=0):
+        self.children: Dict[str, Trie] = {}
+        self.is_terminal = is_terminal
+        self.word = word
+        self.freq = freq
+
+    def add_word(self, w: str, freq: int, pos=0):
+        if pos == len(w):
+            self.children[Trie.END_MARKER] = Trie(True, w, freq)
+            return
+        char_to_go = w[pos]
+        to = self.children.setdefault(char_to_go, Trie())
+        to.add_word(w, freq, pos + 1)
+
+
 def main():
     parser = argparse.ArgumentParser(description='Homework 2: Spellchecker')
     parser.add_argument('--words', required=True, help='Vocabulary words with frequencies (csv: Id,Freq)')
@@ -77,12 +95,17 @@ def main():
     args = parser.parse_args()
 
     words = read_csv(args.words)
-    train = read_csv(args.train)
+    trie_root = Trie()
+    for index, row in words.iterrows():
+        if index % 50000 == 0:
+            print("... building language model %d ..." % index)
+            trie_root.add_word(row['Id'], int(row['Freq']))
 
+    train = read_csv(args.train)
     error_model = ErrorModel(0.1, 0.3, 0.6)
     for index, row in train.iterrows():
         if index % 50000 == 0:
-            print("... training %d ..." % index)
+            print("... training error model %d ..." % index)
         error_model.add_spelling_correction(row['Id'], row['Expected'])
 
     # print(words.sort_values("Freq", ascending=False).head(20))
