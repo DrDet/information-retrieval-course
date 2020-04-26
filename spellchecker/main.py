@@ -1,9 +1,12 @@
 import argparse
+import sys
 from enum import Enum
 from typing import Dict, Tuple
 
-from pandas import read_csv
+from pandas import read_csv, DataFrame
 from Levenshtein import editops
+import csv
+from collections import namedtuple
 
 
 class OpType(Enum):
@@ -12,17 +15,22 @@ class OpType(Enum):
     DELETE = 2
 
 
-class EditOp:
-    def __init__(self, old_char, new_char, preceding_ctx=""):
-        self.preceding_ctx: str = preceding_ctx
-        self.old_char: str = old_char
-        self.new_char: str = new_char
-        if len(old_char) == len(new_char) == 1:
-            self.type = OpType.REPLACE
-        elif len(old_char) == 0:
-            self.type = OpType.INSERT
-        elif len(new_char) == 0:
-            self.type = OpType.DELETE
+EditOpClass = namedtuple("EditOp", ["old_char", "new_char", "preceding_ctx", "type"])
+
+
+def EditOp(old_char, new_char, preceding_ctx=""):
+    preceding_ctx: str = preceding_ctx
+    old_char: str = old_char
+    new_char: str = new_char
+    if len(old_char) == len(new_char) == 1:
+        op_type = OpType.REPLACE
+    elif len(old_char) == 0:
+        op_type = OpType.INSERT
+    elif len(new_char) == 0:
+        op_type = OpType.DELETE
+    else:
+        assert False
+    return EditOpClass(old_char, new_char, preceding_ctx, op_type)
 
 
 class ErrorModel:
@@ -60,30 +68,91 @@ class ErrorModel:
             self._update_models(OpType.REPLACE, char, char, "" if old_i == 0 else old_w[old_i - 1])
 
     def _update_models(self, op_type, old_char, new_char, preceding_ctx):
-        cnt0 = self.zero_level.setdefault(op_type, 0)
-        cnt1 = self.first_level.setdefault(EditOp(old_char, new_char), 0)
-        cnt2 = self.second_level.setdefault(EditOp(old_char, new_char, preceding_ctx), 0)
-        cnt0 += 1
-        cnt1 += 1
-        cnt2 += 1
+        op0 = op_type
+        op1 = EditOp(old_char, new_char)
+        op2 = EditOp(old_char, new_char, preceding_ctx)
+        self.zero_level.setdefault(op0, 0)
+        self.first_level.setdefault(op1, 0)
+        self.second_level.setdefault(op2, 0)
+        self.zero_level[op0] += 1
+        self.first_level[op1] += 1
+        self.second_level[op2] += 1
 
 
 class Trie:
     END_MARKER = "$"
 
     def __init__(self, is_terminal=False, word="", freq=0):
-        self.children: Dict[str, Trie] = {}
         self.is_terminal = is_terminal
         self.word = word
         self.freq = freq
+        self.children: Dict[str, Trie] = {}
+        self.vocabulary: Dict[str, int] = {}
 
     def add_word(self, w: str, freq: int, pos=0):
+        if pos == 0:
+            self.vocabulary[w] = freq
         if pos == len(w):
             self.children[Trie.END_MARKER] = Trie(True, w, freq)
             return
         char_to_go = w[pos]
         to = self.children.setdefault(char_to_go, Trie())
         to.add_word(w, freq, pos + 1)
+
+
+class SpellChecker:
+    def __init__(self, trie: Trie, error_model: ErrorModel, *,
+                 corrections_limit=1,
+                 max_nodes_to_go=5,
+                 weight_threshold_to_go=0.0,
+                 ignore_suffix_len=3):
+        self.trie_root: Trie = trie
+        self.error_model: ErrorModel = error_model
+        self.corrections_limit = corrections_limit
+        self.max_nodes_to_go = max_nodes_to_go
+        self.weight_threshold_to_go = weight_threshold_to_go
+        self.ignore_suffix_len = ignore_suffix_len
+
+    def correct_spelling(self, word: str):
+        corrections = self._get_corrections(self.trie_root, word)
+        corrections.sort(key=lambda x: x[1], reverse=True)
+        if len(corrections) == 0:
+            return word
+        best, best_freq = corrections[0]
+        if word in self.trie_root.vocabulary and best_freq < 5 * self.trie_root.vocabulary[word]:
+            return word
+        return best
+
+    def _get_corrections(self, node: Trie, word: str, pos=0, done_corrections=0) -> [Tuple[str, int]]:
+        if pos == len(word):
+            if Trie.END_MARKER in node.children:
+                terminal_node = node.children[Trie.END_MARKER]
+                return [(terminal_node.word, terminal_node.freq)]
+            else:
+                return []
+        letters_to_go = []
+        max_weight = 0
+        for next_trie_letter, child in node.children.items():
+            if next_trie_letter == Trie.END_MARKER:
+                continue
+            weight = self.error_model.get_weight_of_error(word[pos], next_trie_letter, word[pos - 1] if pos > 0 else "")
+            max_weight = max(max_weight, weight)
+            letters_to_go.append((next_trie_letter, weight))
+        if len(letters_to_go) == 0:
+            return []
+        letters_to_go.sort(key=lambda x: x[1], reverse=True)
+        letters_to_go = list(filter(lambda x: x[1] >= self.weight_threshold_to_go * max_weight,
+                                    letters_to_go[:self.max_nodes_to_go]))
+        res = []
+        for letter, _ in letters_to_go:
+            is_correction = letter != word[pos]
+            if is_correction and pos >= len(word) - self.ignore_suffix_len:
+                continue
+            new_corrections_cnt = done_corrections + is_correction
+            if new_corrections_cnt <= self.corrections_limit:
+                node_to_go = node.children[letter]
+                res += self._get_corrections(node_to_go, word, pos + 1, new_corrections_cnt)
+        return res
 
 
 def main():
@@ -94,29 +163,48 @@ def main():
     parser.add_argument('--submission', required=True, help='csv: Id,Predicted')
     args = parser.parse_args()
 
-    words = read_csv(args.words)
+    MAX_WORD_LEN = 950
+
+    words = read_csv(args.words, converters={'Id': str})
     trie_root = Trie()
     for index, row in words.iterrows():
         if index % 50000 == 0:
             print("... building language model %d ..." % index)
-            trie_root.add_word(row['Id'], int(row['Freq']))
+        word = row['Id']
+        if len(word) > MAX_WORD_LEN:
+            print("skip word at index %d: length = %d -- too big" % (index, len(word)))
+            continue
+        trie_root.add_word(word, int(row['Freq']))
 
-    train = read_csv(args.train)
-    error_model = ErrorModel(0.1, 0.3, 0.6)
+    train = read_csv(args.train, converters={'Id': str, 'Expected': str})
+    error_model = ErrorModel(0, 0.4, 0.6)
     for index, row in train.iterrows():
         if index % 50000 == 0:
             print("... training error model %d ..." % index)
         error_model.add_spelling_correction(row['Id'], row['Expected'])
 
-    # print(words.sort_values("Freq", ascending=False).head(20))
-    print(editops("фперзидеед", "пт"))
+    test = read_csv(args.test, converters={'Id': str})
+    spell_checker = SpellChecker(trie_root, error_model, weight_threshold_to_go=0.1)
+    with open(args.submission, 'w') as out:
+        writer = csv.writer(out, delimiter=',')
+        writer.writerow(['Id', 'Predicted'])
+        corrections_cnt = 0
+        for index, row in test.iterrows():
+            if index % 50000 == 0:
+                print("... testing %d, corrections_cnt: %d ..." % (index, corrections_cnt))
+            word = row['Id']
+            if len(word) > MAX_WORD_LEN:
+                print("skip word at index %d: length = %d -- too big" % (index, len(word)))
+                correction = word
+            else:
+                correction = spell_checker.correct_spelling(word)
+            if word != correction:
+                if corrections_cnt % 10 == 0:
+                    print("%s -> %s" % (word, correction))
+                corrections_cnt += 1
+            writer.writerow([word, correction])
+        print("done, total corrections: %d" % corrections_cnt)
 
 
 if __name__ == '__main__':
     main()
-
-# из исправлений использовать только replace'ы (insert, delete не надо)
-# не больше одного исправления в слове
-# не менять окончания слов (последние 3 буквы)
-# исправлять только слова с русскими буквами (70% слов) ?
-# исправлять только если исправление СИЛЬНО вероятнее чем запрос пользователя (в 5 раз)
